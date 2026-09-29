@@ -39,6 +39,11 @@
       "responsibility": "probe aggregation, deterministic verdicts, and latest result reads"
     },
     {
+      "id": "calendar",
+      "path": "internal/calendar",
+      "responsibility": "timezone-aware rolling calendar, window registration, scoped evaluation"
+    },
+    {
       "id": "domain",
       "path": "internal/domain",
       "responsibility": "entities, DNS value validation, transitions, and stable errors"
@@ -68,7 +73,8 @@
       "atomic_persistence",
       "error_propagation",
       "validation_boundary",
-      "concurrency"
+      "concurrency",
+      "scheduled_window_gating"
     ]
   },
   "workflows": [
@@ -151,6 +157,29 @@
         "httpapi",
         "assessment",
         "probe",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "calendar-window-gating",
+      "name": "Timezone-aware maintenance calendar",
+      "entry": "PUT /v1/plans/{id}/calendar/windows -> evaluate -> activate/leases gating",
+      "steps": [
+        "register one-time or weekly permit windows and pause periods with an IANA timezone",
+        "evaluate activation at plan scope and lease allocation at region scope with one evaluator",
+        "replay cross-midnight and DST occurrences as deterministic UTC intervals",
+        "freeze the window decision on the plan and lease group, then edit the calendar without rewriting it",
+        "restart the process and restore the calendar and frozen decisions"
+      ],
+      "success": "in-window activation and allocation proceed with frozen decisions, out-of-window and paused requests return window_closed with the next opening, and unconfigured plans stay all hours",
+      "failure": "invalid timezones, times or scopes and closed windows reject without partial leases or state changes",
+      "verification": "workflowprobe calendar-window-gating covers all-hours default, windows, pauses, regions, cross-midnight, DST, overlap basis, freeze, restart and validation",
+      "module_ids": [
+        "httpapi",
+        "calendar",
+        "plan",
+        "allocation",
         "domain",
         "storage"
       ]

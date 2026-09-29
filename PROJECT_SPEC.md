@@ -82,6 +82,27 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
 - `created_at`。
 
+### MaintenanceWindow
+
+附加在滚动计划上的带时区日历条目，可以是允许上线的维护窗口（`permit`）或暂停时段（`pause`）。
+
+- `id`、`plan_id`、`mode`（`permit`/`pause`）、`schedule`（`once`/`weekly`）。
+- `timezone`：IANA 时区名，周期窗口按该时区的本地挂钟时间解释。
+- 一次性窗口使用 `starts_at`、`ends_at`（RFC3339 绝对时刻）。
+- 周期窗口使用 `weekdays`（0=周日到 6=周六）与 `start_time`、`end_time`（`HH:MM`），`end_time` 早于 `start_time` 表示跨日。
+- `regions`：为空表示计划级且适用于所有节点区域；非空时只适用于列出的区域。
+- `version`：每次替换递增；删除是软删除（`deleted`），保留身份以还原历史解释。
+
+### WindowDecision
+
+激活或租约分配发生瞬间冻结的、不可静默改写的日历解释。
+
+- `allowed`、`reason`（`unconfigured`、`no_matching_permit_window`、`paused`）、`scope`（`plan`/`region`）、`mode`（`all_hours`/`scheduled`）。
+- `evaluated_at`：统一使用服务时钟的 UTC 时刻。
+- `basis`：命中的具体窗口与该次发生的 UTC `[starts_at, ends_at)` 区间、时区与本地时间。
+- `blocking_pause_id` 与 `next_opening_at`：被暂停或无窗口时返回的确定结果。
+- 计划激活后，该解释挂在 `RolloutPlan.window_decision`；租约组挂在 `LeaseGroup.window_decision`。
+
 ## 4. 状态和规则
 
 ### 滚动计划状态
@@ -94,6 +115,17 @@ draft --activate--> active --complete--> completed
 - 只有 `active` 可以完成。
 - 激活后不能继续添加区域版本。
 - 激活和完成需要匹配当前版本。
+
+### 日历与上线窗口规则
+
+- 计划从未配置日历（没有任何未删除条目）时，全天任何时间都可激活并领取租约；一旦存在条目，默认拒绝，必须有命中的 `permit` 窗口才放行。
+- 计划激活与节点分配调用同一个纯函数求值器、同一服务时钟和同一 UTC 时刻解释：激活使用计划级作用域（忽略区域窗口），租约分配使用请求区域作用域。
+- `pause` 时段总是优先于 `permit`：即使许可窗口覆盖该时刻，暂停期间也拒绝激活和新分配。
+- 周期窗口按时区本地挂钟时间逐次展开；区间为闭开区间 `[start, end)`，相邻窗口既不重叠也不留缝。夏令时空档与重复小时由 Go 时区数据确定地归一化，跨日窗口确定性地延续到次日。
+- 多个许可窗口同时覆盖时，选择具体发生开始最早者作为 `basis`，平局按窗口 ID 决胜。
+- 窗口变化只影响之后的判定：已经冻结在计划和租约组上的 `WindowDecision` 永不被重算或覆盖；同键租约请求在窗口变化后重放仍返回带原始解释的原租约组。
+- 删除全部条目后计划恢复全天可上线；窗口定义可整份替换并递增版本，身份不变。
+- 日历条目和冻结解释随 JSON 快照持久化，服务重启后按当时窗口还原；内置 `time/tzdata` 保证无系统时区库的主机解释一致。
 
 ### 节点与租约生命周期
 
@@ -212,6 +244,29 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 日历窗口与上线门控
+
+入口：
+
+- `PUT /v1/plans/{id}/calendar/windows`
+- `PUT /v1/plans/{id}/calendar/windows/{window_id}`
+- `DELETE /v1/plans/{id}/calendar/windows/{window_id}`
+- `GET /v1/plans/{id}/calendar`
+- `GET /v1/plans/{id}/calendar/windows/{window_id}`
+- `GET /v1/plans/{id}/calendar/evaluation`
+- 门控点：`PATCH /v1/plans/{id}/activate`、`PATCH /v1/plans/{id}/leases`
+
+步骤：
+
+1. HTTP 层严格解码窗口 JSON，服务层校验模式、调度、IANA 时区、工作日与挂钟时间、适用区域。
+2. 窗口在锁内写入快照并递增计划版本。
+3. 激活与租约分配用同一求值器在服务时钟的 UTC 时刻解释；拒绝时返回 `window_closed` 和下一次开窗时刻。
+4. 放行时把完整解释冻结到计划或租约组上，重放与后续窗口编辑都不改写它。
+
+成功行为：窗口外拒绝、窗口内放行、暂停覆盖许可、跨日和夏令时发生得到确定区间，重启后日历与冻结解释可还原。
+
+失败行为：非法时区或时间、未知计划或窗口不会修改状态；窗口关闭时租约分配不产生部分租约。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -223,7 +278,8 @@ ready --lease--> leased --report--> ready
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
-| domain | `internal/domain` | 聚合、值校验、状态迁移和纯计算 |
+| calendar | `internal/calendar` | 带时区滚动日历、窗口登记与作用域求值 |
+| domain | `internal/domain` | 聚合、值校验、状态迁移、纯日历计算和纯判定计算 |
 | store | `internal/store` | 锁内副本事务和原子 JSON 持久化 |
 | platform | `internal/platform` | 时钟、标识、游标和文件锁 |
 | runtime-probe | `internal/workflowprobe`, `cmd/workflowprobe` | 真实 HTTP 路径验证 |
@@ -260,12 +316,19 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
+- `PUT /v1/plans/{id}/calendar/windows`
+- `GET /v1/plans/{id}/calendar`
+- `GET /v1/plans/{id}/calendar/evaluation`
+- `GET /v1/plans/{id}/calendar/windows/{window_id}`
+- `PUT /v1/plans/{id}/calendar/windows/{window_id}`
+- `DELETE /v1/plans/{id}/calendar/windows/{window_id}`
 
 ## 8. 工程机制
 
 - 状态迁移：计划、节点和租约使用显式迁移表。
 - 乐观并发：计划版本不匹配时拒绝变更。
 - 幂等写入：租约分配和探针登记都保存请求键和载荷指纹。
+- 日历门控：激活与分配共用纯函数日历求值器，放行解释冻结后不再随窗口编辑改写。
 - 资源生命周期：租约带截止时间，支持释放、完成和过期清理。
 - 原子持久化：事务先复制状态，成功后再通过临时文件替换快照。
 - 错误传播：领域错误稳定映射到 HTTP 状态和错误代码。
@@ -282,5 +345,6 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 未配置日历全天放行、一次性与周期窗口、暂停覆盖、区域作用域、跨日与夏令时确定区间、重叠选基、解释冻结、重启还原和非法窗口拒绝。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

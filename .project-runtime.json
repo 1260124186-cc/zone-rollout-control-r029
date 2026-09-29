@@ -23,6 +23,10 @@
     {
       "workflow_id": "consistency-assessment",
       "command": "go run ./cmd/workflowprobe consistency-assessment"
+    },
+    {
+      "workflow_id": "calendar-window-gating",
+      "command": "go run ./cmd/workflowprobe calendar-window-gating"
     }
   ]
 }

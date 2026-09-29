@@ -14,6 +14,7 @@ import (
 
 	"solo-0014-zone-rollout-control/internal/allocation"
 	"solo-0014-zone-rollout-control/internal/assessment"
+	"solo-0014-zone-rollout-control/internal/calendar"
 	"solo-0014-zone-rollout-control/internal/fleet"
 	"solo-0014-zone-rollout-control/internal/httpapi"
 	"solo-0014-zone-rollout-control/internal/plan"
@@ -49,7 +50,8 @@ func newHarness() (*harness, error) {
 	allocations := allocation.New(stateStore, clock, ids)
 	probes := probe.New(stateStore, clock, ids, allocations)
 	assessments := assessment.New(stateStore, clock, ids)
-	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
+	calendars := calendar.New(stateStore, clock, ids)
+	api := httpapi.New(plans, nodes, allocations, probes, assessments, calendars, ids, logger)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -76,6 +78,42 @@ func (h *harness) close() {
 	_ = h.server.Shutdown(ctx)
 	_ = h.listener.Close()
 	_ = os.RemoveAll(h.tempDir)
+}
+
+// relaunch tears down the HTTP server and rebuilds every service against the
+// same snapshot file and the same clock, simulating a process restart.
+func (h *harness) relaunch() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = h.server.Shutdown(ctx)
+	_ = h.listener.Close()
+
+	stateStore, err := store.Open(h.tempDir + "/state.json")
+	if err != nil {
+		return fmt.Errorf("reopen store: %w", err)
+	}
+	ids := platform.CryptoIDGenerator{}
+	plans := plan.New(stateStore, h.clock, ids)
+	nodes := fleet.New(stateStore, h.clock, ids)
+	allocations := allocation.New(stateStore, h.clock, ids)
+	probes := probe.New(stateStore, h.clock, ids, allocations)
+	assessments := assessment.New(stateStore, h.clock, ids)
+	calendars := calendar.New(stateStore, h.clock, ids)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	api := httpapi.New(plans, nodes, allocations, probes, assessments, calendars, ids, logger)
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("listen after restart: %w", err)
+	}
+	server := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	h.server = server
+	h.listener = listener
+	h.baseURL = "http://" + listener.Addr().String()
+	return nil
 }
 
 func (h *harness) call(method string, path string, requestBody any, target any) error {

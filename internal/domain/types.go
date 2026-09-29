@@ -59,18 +59,19 @@ type ZoneRevision struct {
 }
 
 type RolloutPlan struct {
-	ID                  string     `json:"id"`
-	Zone                string     `json:"zone"`
-	State               PlanState  `json:"state"`
-	MinimumSuccessRatio float64    `json:"minimum_success_ratio"`
-	MaximumLatencyMS    int        `json:"maximum_latency_ms"`
-	ExpectedNodes       int        `json:"expected_nodes"`
-	Version             uint64     `json:"version"`
-	LatestRevisionID    string     `json:"latest_revision_id,omitempty"`
-	LatestAssessmentID  string     `json:"latest_assessment_id,omitempty"`
-	CreatedAt           time.Time  `json:"created_at"`
-	ActivatedAt         *time.Time `json:"activated_at,omitempty"`
-	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+	ID                  string          `json:"id"`
+	Zone                string          `json:"zone"`
+	State               PlanState       `json:"state"`
+	MinimumSuccessRatio float64         `json:"minimum_success_ratio"`
+	MaximumLatencyMS    int             `json:"maximum_latency_ms"`
+	ExpectedNodes       int             `json:"expected_nodes"`
+	Version             uint64          `json:"version"`
+	LatestRevisionID    string          `json:"latest_revision_id,omitempty"`
+	LatestAssessmentID  string          `json:"latest_assessment_id,omitempty"`
+	CreatedAt           time.Time       `json:"created_at"`
+	ActivatedAt         *time.Time      `json:"activated_at,omitempty"`
+	CompletedAt         *time.Time      `json:"completed_at,omitempty"`
+	WindowDecision      *WindowDecision `json:"window_decision,omitempty"`
 }
 
 type ResolverNode struct {
@@ -96,13 +97,14 @@ type NodeLease struct {
 }
 
 type LeaseGroup struct {
-	ID                 string    `json:"id"`
-	PlanID             string    `json:"plan_id"`
-	RequestKey         string    `json:"request_key"`
-	RequestFingerprint string    `json:"request_fingerprint"`
-	Region             string    `json:"region,omitempty"`
-	LeaseIDs           []string  `json:"lease_ids"`
-	CreatedAt          time.Time `json:"created_at"`
+	ID                 string          `json:"id"`
+	PlanID             string          `json:"plan_id"`
+	RequestKey         string          `json:"request_key"`
+	RequestFingerprint string          `json:"request_fingerprint"`
+	Region             string          `json:"region,omitempty"`
+	LeaseIDs           []string        `json:"lease_ids"`
+	CreatedAt          time.Time       `json:"created_at"`
+	WindowDecision     *WindowDecision `json:"window_decision,omitempty"`
 }
 
 type Probe struct {
@@ -154,6 +156,7 @@ type State struct {
 	Assessments           map[string]RolloutAssessment `json:"assessments"`
 	LeaseRequestKeys      map[string]string            `json:"lease_request_keys"`
 	AssessmentRequestKeys map[string]string            `json:"assessment_request_keys"`
+	Windows               map[string]WindowEntry       `json:"windows"`
 	AuditEvents           []AuditEvent                 `json:"audit_events"`
 }
 

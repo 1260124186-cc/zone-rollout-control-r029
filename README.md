@@ -45,6 +45,7 @@ internal/fleet              解析节点档案服务
 internal/allocation         节点选择和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
 internal/assessment         一致性聚合和最新结果查询
+internal/calendar           带时区滚动日历、窗口登记和作用域求值
 internal/httpapi            HTTP 路由、中间件和响应映射
 internal/workflowprobe      真实 HTTP 路径验证
 ```
@@ -135,6 +136,48 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
   -d '{"request_key": "assess-request-0001"}'
 ```
 
+登记上线窗口（带时区）：
+
+```bash
+# 一次性窗口：绝对 RFC3339 时刻
+curl -sS -X PUT http://127.0.0.1:8090/v1/plans/<plan_id>/calendar/windows \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mode": "permit",
+    "schedule": "once",
+    "timezone": "Asia/Shanghai",
+    "starts_at": "2026-10-09T22:00:00+08:00",
+    "ends_at": "2026-10-10T01:00:00+08:00",
+    "regions": ["east"]
+  }'
+
+# 周期窗口：周五 23:00 到次日 01:00（end_time 早于 start_time 即跨日）
+curl -sS -X PUT http://127.0.0.1:8090/v1/plans/<plan_id>/calendar/windows \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mode": "permit",
+    "schedule": "weekly",
+    "timezone": "Asia/Shanghai",
+    "weekdays": [5],
+    "start_time": "23:00",
+    "end_time": "01:00"
+  }'
+
+# 暂停时段：命中时覆盖所有许可窗口
+curl -sS -X PUT http://127.0.0.1:8090/v1/plans/<plan_id>/calendar/windows \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "mode": "pause",
+    "schedule": "once",
+    "timezone": "UTC",
+    "starts_at": "2026-10-09T15:30:00Z",
+    "ends_at": "2026-10-09T16:00:00Z"
+  }'
+
+# 试算某个时刻/区域是否可上线（不改变状态）
+curl -sS "http://127.0.0.1:8090/v1/plans/<plan_id>/calendar/evaluation?at=2026-10-09T16:00:00Z&region=east"
+```
+
 ## API 概览
 
 成功响应：
@@ -178,6 +221,12 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
 | `GET` | `/v1/plans/{id}/assessments/latest` | 查询最近判定 |
+| `PUT` | `/v1/plans/{id}/calendar/windows` | 登记一次性/周期窗口或暂停时段 |
+| `GET` | `/v1/plans/{id}/calendar` | 列出计划的有效窗口 |
+| `GET` | `/v1/plans/{id}/calendar/evaluation` | 按时刻和区域试算上线窗口 |
+| `GET` | `/v1/plans/{id}/calendar/windows/{window_id}` | 查询单个窗口 |
+| `PUT` | `/v1/plans/{id}/calendar/windows/{window_id}` | 整份替换窗口定义 |
+| `DELETE` | `/v1/plans/{id}/calendar/windows/{window_id}` | 删除窗口 |
 
 ## 状态及失败行为
 
@@ -188,6 +237,11 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
+- 未配置日历的计划全天可上线；配置窗口后默认拒绝，必须命中 `permit` 窗口。计划激活（计划级作用域）和租约领取（区域作用域）使用同一个求值器与同一个 UTC 时刻。
+- 周期窗口按 IANA 时区的本地挂钟时间展开；`end_time` 早于 `start_time` 为跨日；夏令时空档和重复小时按 Go 时区数据确定归一化。区间为闭开区间 `[start, end)`，多窗口覆盖时按最早发生开始选基（平局按窗口 ID）。
+- `pause` 暂停时段总是覆盖许可窗口；拒绝时返回 `window_closed`（HTTP 409），并给出阻塞暂停与下一次开窗时刻。
+- 激活和租约组把当时的 `window_decision` 冻结持久化；窗口登记、替换、删除只影响之后的判定，永不静默改写已冻结解释，幂等重放也不会重新求值。
+- 日历与冻结解释随快照持久化，重启后按当时窗口还原（内置 `time/tzdata`，无需主机时区库）。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
 
 ## 后续工程任务的行为边界
@@ -216,6 +270,7 @@ go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe calendar-window-gating
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

@@ -129,9 +129,21 @@ func (s *Service) Activate(
 		if err := domain.ActivatePlan(&current, now); err != nil {
 			return err
 		}
+		// Scheduled activation is gated with the same calendar evaluator and
+		// the same instant used by node allocation. The resulting decision is
+		// frozen onto the plan so later calendar edits cannot rewrite it.
+		decision := domain.EvaluateCalendar(
+			state, planID, current.Zone, domain.DecisionScopePlan, "", now,
+		)
+		if !decision.Allowed {
+			return domain.ClosedError(decision)
+		}
+		current.WindowDecision = &decision
 		state.Plans[planID] = current
 		store.AddAudit(state, s.ids, "plan", planID, "activated", now, map[string]any{
-			"version": current.Version,
+			"version":       current.Version,
+			"window_reason": decision.Reason,
+			"window_mode":   decision.Mode,
 		})
 		plan = current
 		return nil

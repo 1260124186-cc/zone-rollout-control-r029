@@ -63,6 +63,17 @@ func (s *Service) Allocate(
 		}
 
 		expireLeases(state, now)
+
+		// Node allocation uses the exact same calendar evaluator, instant and
+		// region scope semantics as plan activation. A deny blocks the whole
+		// allocation; an allow is frozen onto the group for replay and audit.
+		decision := domain.EvaluateCalendar(
+			state, planID, plan.Zone, domain.DecisionScopeRegion, input.Region, now,
+		)
+		if !decision.Allowed {
+			return domain.ClosedError(decision)
+		}
+
 		candidates := make([]domain.ResolverNode, 0)
 		for _, node := range state.Nodes {
 			if node.State != domain.NodeReady {
@@ -117,12 +128,15 @@ func (s *Service) Allocate(
 			Region:             input.Region,
 			LeaseIDs:           leaseIDs,
 			CreatedAt:          now,
+			WindowDecision:     &decision,
 		}
 		state.LeaseGroups[group.ID] = group
 		state.LeaseRequestKeys[requestIndex] = group.ID
 		store.AddAudit(state, s.ids, "lease_group", group.ID, "created", now, map[string]any{
-			"plan_id":     planID,
-			"lease_count": len(leaseIDs),
+			"plan_id":       planID,
+			"lease_count":   len(leaseIDs),
+			"window_reason": decision.Reason,
+			"window_mode":   decision.Mode,
 		})
 		return nil
 	})
