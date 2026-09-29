@@ -1,8 +1,8 @@
 # Zone Rollout Control
 
-Zone Rollout Control 是仅依赖 Go 标准库的本机 HTTP 控制面，用于协调区域版本上线。它管理滚动计划、不可变区域版本、解析节点租约、探针结果和一致性判定。
+Zone Rollout Control 是仅依赖 Go 标准库的本机 HTTP 控制面，用于协调区域版本上线。它管理滚动计划、不可变区域版本、解析节点租约、探针结果、一致性判定，以及带时区的维护窗口日历。
 
-本仓库是健康项目初始化基线。当前不包含单元测试、夹具或浏览器测试；测试工作有意延后到后续测试阶段。现在通过真实 HTTP 路由的生产探针验证构建和四条核心工作流。
+本仓库是健康项目初始化基线。当前不包含单元测试、夹具或浏览器测试；测试工作有意延后到后续测试阶段。现在通过真实 HTTP 路由的生产探针验证构建和五条核心工作流。
 
 ## 环境要求
 
@@ -45,6 +45,8 @@ internal/fleet              解析节点档案服务
 internal/allocation         节点选择和租约生命周期
 internal/probe              探针登记、幂等重放和租约完成
 internal/assessment         一致性聚合和最新结果查询
+internal/calendar           维护日历登记、窗口墓碑和只读准入查询
+internal/schedule           时区、跨日、夏令时、暂停和重叠的纯时间解释
 internal/httpapi            HTTP 路由、中间件和响应映射
 internal/workflowprobe      真实 HTTP 路径验证
 ```
@@ -135,6 +137,59 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
   -d '{"request_key": "assess-request-0001"}'
 ```
 
+登记维护窗口日历：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/calendars \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "cn night windows",
+    "timezone": "Asia/Shanghai",
+    "scope_zones": ["edge.example"]
+  }'
+```
+
+为日历登记一个每周二 02:00–04:00（本地墙钟，可跨日）的允许窗口：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/calendars/<calendar_id>/windows \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "tuesday-night",
+    "kind": "window",
+    "schedule": "weekly",
+    "priority": 0,
+    "weekly": {
+      "weekday": 2,
+      "start": "02:00",
+      "duration_minutes": 120,
+      "gap_policy": "shift"
+    }
+  }'
+```
+
+登记一次性暂停时段（优先级最高，命中即否决）：
+
+```bash
+curl -sS -X PUT http://127.0.0.1:8090/v1/calendars/<calendar_id>/windows \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name": "incident-hold",
+    "kind": "suspension",
+    "schedule": "one_time",
+    "one_time": {
+      "start_at": "2026-09-29T18:00:00Z",
+      "end_at":   "2026-09-29T20:00:00Z"
+    }
+  }'
+```
+
+不改变状态地探测某个瞬间是否可以上线：
+
+```bash
+curl -sS 'http://127.0.0.1:8090/v1/calendar-admission?zone=edge.example&at=2026-09-29T18:30:00Z'
+```
+
 ## API 概览
 
 成功响应：
@@ -178,6 +233,14 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 | `PATCH` | `/v1/leases/{id}/probes` | 登记探针并完成租约 |
 | `PATCH` | `/v1/plans/{id}/assessments` | 创建一致性判定 |
 | `GET` | `/v1/plans/{id}/assessments/latest` | 查询最近判定 |
+| `PUT` | `/v1/calendars` | 登记带时区和适用范围的日历 |
+| `GET` | `/v1/calendars` | 分页查询日历 |
+| `GET` | `/v1/calendars/{id}` | 查询日历及其有效窗口 |
+| `PATCH` | `/v1/calendars/{id}/archive` | 归档日历（墓碑） |
+| `DELETE` | `/v1/calendars/{id}` | 等价于归档 |
+| `PUT` | `/v1/calendars/{id}/windows` | 登记一次性或周期窗口、暂停时段 |
+| `DELETE` | `/v1/calendars/{id}/windows/{window_id}` | 归档单个窗口 |
+| `GET/PATCH` | `/v1/calendar-admission` | 只读探测某瞬间的准入解释 |
 
 ## 状态及失败行为
 
@@ -188,6 +251,12 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 - 一个节点同一时刻最多有一个 `claimed` 租约。
 - 相同请求键和相同内容可安全重放；同键异载荷返回 `idempotency_conflict`。
 - 一致性判定综合节点覆盖率、序列号、成功比例和最大延迟，返回 `consistent` 或 `review_required`。
+- 维护窗口按日历 IANA 时区的本地墙钟解释；没有任何适用日历的计划继续全天可上线。
+- 计划激活和节点分配使用同一个时间解释：窗口外返回 `outside_maintenance_window`，暂停时段命中同样拒绝。
+- 周期窗口可跨日；夏令时间隙锚点按 `shift`/`reject` 确定处理，回退歧义取较早瞬间。
+- 重叠允许窗口按优先级、一次性优先于周期、持续时长、窗口标识的固定顺序入选。
+- 激活与租约分配各自冻结当时的准入解释，之后窗口登记、归档或删除都不能改写已开始的批准；租约幂等重放不重算日历。
+- 日历和窗口只追加墓碑与新版本，随快照原子持久化并在重启后还原。
 - 所有校验和冲突在快照替换前返回，不留下部分状态。
 
 ## 后续工程任务的行为边界
@@ -209,13 +278,14 @@ curl -sS -X PATCH http://127.0.0.1:8090/v1/plans/<plan_id>/assessments \
 
 ## 验证
 
-测试阶段有意延后，因此当前不运行单元测试或浏览器测试。以下命令分别验证四条工作流；每条命令启动真实本机 HTTP 服务、使用独立临时状态、覆盖成功与失败路径，然后关闭服务：
+测试阶段有意延后，因此当前不运行单元测试或浏览器测试。以下命令分别验证五条工作流；每条命令启动真实本机 HTTP 服务、使用独立临时状态、覆盖成功与失败路径，然后关闭服务：
 
 ```bash
 go run ./cmd/workflowprobe plan-revision-lifecycle
 go run ./cmd/workflowprobe node-lease-allocation
 go run ./cmd/workflowprobe probe-ingestion
 go run ./cmd/workflowprobe consistency-assessment
+go run ./cmd/workflowprobe calendar-window-admission
 ```
 
 探针不访问外部网络，也不依赖已有状态文件。

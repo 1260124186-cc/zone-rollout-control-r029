@@ -82,6 +82,35 @@ Zone Rollout Control 是面向 DNS 运维人员的 Go HTTP 控制面。它把区
 - `probe_count`、`success_count`、`success_ratio`、`maximum_latency_ms`。
 - `created_at`。
 
+### MaintenanceCalendar
+
+按 IANA 时区解释的滚动维护日历，通过区域名和可用区适用范围决定是否约束一次上线动作。
+
+- `id`、`name`、`timezone`（IANA 名称，如 `Asia/Shanghai`、`America/New_York`）。
+- `scope_zones`、`scope_regions`：为空表示通配；区域型日历不参与无可用区的计划激活。
+- `version`：每次窗口登记或归档后递增。
+- `archived_at`：归档日历只打墓碑，不物理删除；归档后不再参与准入。
+
+### MaintenanceWindow
+
+日历中的不可变窗口条目，登记后只能归档不能就地修改。
+
+- `id`、`calendar_id`、`name`、`priority`。
+- `kind`：`window`（允许上线）或 `suspension`（暂停，否决任何重叠窗口）。
+- `schedule`：`one_time`（RFC3339 绝对起止、半开区间）或 `weekly`。
+- 周期窗口用 `weekday`、本地 `start`（HH:MM）、`duration_minutes` 表达，可跨日。
+- `gap_policy`：周期锚点落入夏令时间隙时，`shift` 前移到间隙结束瞬间，`reject` 跳过该次发生。
+- `archived_at`：归档墓碑。
+
+### AdmissionDecision
+
+在激活或租约分配当时冻结的日历解释，写入计划或租约组后不再重算。
+
+- `allowed`、`mode`：`scheduled` 或 `always_open`（无任何适用日历）。
+- `reason`：`outside_window` 或 `suspended`。
+- `matched_window_id`、`matched_calendar_id`、`suspension_window_id`。
+- `evaluated_at`、`zone`、`region`、`calendar_ids`、`calendar_versions`。
+
 ## 4. 状态和规则
 
 ### 滚动计划状态
@@ -142,6 +171,18 @@ ready --lease--> leased --report--> ready
 - `success_ratio_below_minimum`
 - `latency_limit_exceeded`
 
+### 维护窗口日历规则
+
+- 未配置任何适用日历的计划继续按全天可上线运行，冻结结果记为 `always_open`。
+- 计划激活和节点租约分配必须通过同一个纯时间解释入口评估，激活不带可用区，分配带请求可用区。
+- 窗口起止为半开区间 `[start, end)`；周期窗口按日历本地墙钟锚点解析为绝对瞬间，跨日窗口持续到次日。
+- 夏令时间隙锚点按 `shift`/`reject` 得到确定结果；回退歧义锚点确定取较早（转换前）瞬间。
+- 重叠允许窗口的入选顺序固定：`priority` 小者优先，其次一次性优先于周期，再次持续时间长者优先，最后按窗口标识。
+- 任一适用日历的暂停时段覆盖当前瞬间即否决，即使存在重叠允许窗口。
+- 激活与租约分配的准入结论各自冻结；之后登记、归档或删除窗口都不能改写已开始批准的解释。
+- 租约分配的幂等重放直接返回原租约组，不重新评估日历。
+- 日历和窗口的变更只追加墓碑和新版本，不就地更新；快照原子持久化，服务重启后还原当时窗口。
+
 ## 5. 工作流
 
 ### W1 计划生命周期和区域版本
@@ -177,7 +218,7 @@ ready --lease--> leased --report--> ready
 
 成功行为：每个节点获得一个有期限的 `claimed` 租约。
 
-失败行为：计划非活动、无可用节点、请求键同键异载荷或保存失败时不会产生部分租约。
+失败行为：计划非活动、不在维护窗口内、被暂停时段覆盖、无可用节点、请求键同键异载荷或保存失败时不会产生部分租约。
 
 ### W3 探针登记
 
@@ -212,6 +253,29 @@ ready --lease--> leased --report--> ready
 
 失败行为：缺少区域版本、没有探针、请求键冲突或保存失败不会更新计划摘要。
 
+### W5 维护窗口日历
+
+入口：
+
+- `PUT /v1/calendars`
+- `GET /v1/calendars`
+- `GET /v1/calendars/{id}`
+- `PATCH`/`DELETE /v1/calendars/{id}/archive`
+- `PUT /v1/calendars/{id}/windows`
+- `DELETE /v1/calendars/{id}/windows/{window_id}`
+- `GET`/`PATCH /v1/calendar-admission`
+
+步骤：
+
+1. 登记带 IANA 时区和区域、可用区适用范围的日历。
+2. 登记一次性或周期允许窗口与暂停时段，周期窗口按本地墙钟解析。
+3. 计划激活和租约分配在各自写事务内调用同一个纯评估入口。
+4. 准入结论连同命中窗口、日历版本冻结到计划或租约组。
+
+成功行为：窗口内允许并冻结命中窗口；窗口外与暂停时段返回 `outside_maintenance_window` 冲突；无适用日历时为 `always_open`。
+
+失败行为：非法时区、非法周期表达式、间隙策略、持续时长或归档冲突不修改状态；窗口变更只追加墓碑，不能改写已开始的批准。
+
 ## 6. 模块边界
 
 | 模块 | 路径 | 责任 |
@@ -223,6 +287,8 @@ ready --lease--> leased --report--> ready
 | allocation | `internal/allocation` | 节点筛选、幂等分配组和租约生命周期 |
 | probe | `internal/probe` | 探针校验、幂等写入和租约完成 |
 | assessment | `internal/assessment` | 探针聚合和一致性判定 |
+| calendar | `internal/calendar` | 维护日历登记、窗口墓碑和只读准入查询 |
+| schedule | `internal/schedule` | 时区、跨日、夏令时、暂停和重叠的纯时间解释 |
 | domain | `internal/domain` | 聚合、值校验、状态迁移和纯计算 |
 | store | `internal/store` | 锁内副本事务和原子 JSON 持久化 |
 | platform | `internal/platform` | 时钟、标识、游标和文件锁 |
@@ -260,6 +326,15 @@ ready --lease--> leased --report--> ready
 - `PATCH /v1/leases/{id}/probes`
 - `PATCH /v1/plans/{id}/assessments`
 - `GET /v1/plans/{id}/assessments/latest`
+- `PUT /v1/calendars`
+- `GET /v1/calendars`
+- `GET /v1/calendars/{id}`
+- `PATCH /v1/calendars/{id}/archive`
+- `DELETE /v1/calendars/{id}`
+- `PUT /v1/calendars/{id}/windows`
+- `DELETE /v1/calendars/{id}/windows/{window_id}`
+- `GET /v1/calendar-admission`
+- `PATCH /v1/calendar-admission`
 
 ## 8. 工程机制
 
@@ -268,6 +343,8 @@ ready --lease--> leased --report--> ready
 - 幂等写入：租约分配和探针登记都保存请求键和载荷指纹。
 - 资源生命周期：租约带截止时间，支持释放、完成和过期清理。
 - 原子持久化：事务先复制状态，成功后再通过临时文件替换快照。
+- 时区日历：日历、窗口和准入结论随快照持久化，重启后按当时窗口还原，进程内嵌 IANA tzdata。
+- 批准冻结：激活和租约分配把日历解释写入聚合，窗口变化只能新增墓碑，不能回溯改写。
 - 错误传播：领域错误稳定映射到 HTTP 状态和错误代码。
 - 边界校验：DNS 名称、IP、序列号、延迟、比例、分页和能力均显式验证。
 - 并发入口：HTTP 处理器可并发运行，状态修改通过互斥锁串行化。
@@ -282,5 +359,6 @@ ready --lease--> leased --report--> ready
 2. 节点分配、租约唯一性、幂等重放和无可用节点冲突。
 3. 探针首写、同键重放、同键异载荷冲突和释放冲突。
 4. 一致性通过、审核触发、最新结果查询和幂等重放。
+5. 日历登记、窗口内外准入、暂停否决、窗口变更不重写已冻结批准、夏令时间隙与回退、跨日窗口和重启还原。
 
 每条探针使用独立临时目录，不访问外部网络，结束后关闭服务。

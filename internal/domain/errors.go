@@ -19,6 +19,7 @@ const (
 	CodeLeaseNotClaimed     ErrorCode = "lease_not_claimed"
 	CodeNoProbes            ErrorCode = "no_probes"
 	CodeConflict            ErrorCode = "conflict"
+	CodeOutsideWindow       ErrorCode = "outside_maintenance_window"
 	CodeStorageFailure      ErrorCode = "storage_failure"
 	CodeInternal            ErrorCode = "internal_error"
 )

@@ -20,6 +20,8 @@ func Run(args []string, output io.Writer) error {
 		run = runProbeIngestion
 	case "consistency-assessment":
 		run = runConsistencyAssessment
+	case "calendar-window-admission":
+		run = runCalendarWindowAdmission
 	default:
 		return fmt.Errorf("unsupported workflow %q", args[0])
 	}

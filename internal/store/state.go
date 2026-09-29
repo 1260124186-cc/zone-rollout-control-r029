@@ -33,6 +33,12 @@ func normalize(state domain.State) domain.State {
 	if state.Assessments == nil {
 		state.Assessments = make(map[string]domain.RolloutAssessment)
 	}
+	if state.Calendars == nil {
+		state.Calendars = make(map[string]domain.Calendar)
+	}
+	if state.Windows == nil {
+		state.Windows = make(map[string]domain.MaintenanceWindow)
+	}
 	if state.LeaseRequestKeys == nil {
 		state.LeaseRequestKeys = make(map[string]string)
 	}

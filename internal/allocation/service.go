@@ -8,6 +8,7 @@ import (
 
 	"solo-0014-zone-rollout-control/internal/domain"
 	"solo-0014-zone-rollout-control/internal/platform"
+	"solo-0014-zone-rollout-control/internal/schedule"
 	"solo-0014-zone-rollout-control/internal/store"
 )
 
@@ -58,8 +59,22 @@ func (s *Service) Allocate(
 					"request_key": input.RequestKey,
 				})
 			}
+			// Replays return the original approval. The calendar is not
+			// re-evaluated, so a window ending after the first allocation
+			// cannot change or invalidate this lease group.
 			group = existing
 			return nil
+		}
+
+		// Same calendar interpretation as plan activation, scoped to the
+		// requested region. The resulting decision is frozen onto the lease
+		// group together with the leases.
+		decision := schedule.FromState(state, schedule.Scope{
+			Zone:   plan.Zone,
+			Region: input.Region,
+		}, now)
+		if !decision.Allowed {
+			return schedule.DeniedError(decision)
 		}
 
 		expireLeases(state, now)
@@ -116,6 +131,7 @@ func (s *Service) Allocate(
 			RequestFingerprint: fingerprint,
 			Region:             input.Region,
 			LeaseIDs:           leaseIDs,
+			Admission:          &decision,
 			CreatedAt:          now,
 		}
 		state.LeaseGroups[group.ID] = group

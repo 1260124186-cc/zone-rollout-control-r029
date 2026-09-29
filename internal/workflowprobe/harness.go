@@ -14,12 +14,15 @@ import (
 
 	"solo-0014-zone-rollout-control/internal/allocation"
 	"solo-0014-zone-rollout-control/internal/assessment"
+	"solo-0014-zone-rollout-control/internal/calendar"
 	"solo-0014-zone-rollout-control/internal/fleet"
 	"solo-0014-zone-rollout-control/internal/httpapi"
 	"solo-0014-zone-rollout-control/internal/plan"
 	"solo-0014-zone-rollout-control/internal/platform"
 	"solo-0014-zone-rollout-control/internal/probe"
 	"solo-0014-zone-rollout-control/internal/store"
+
+	_ "time/tzdata"
 )
 
 type harness struct {
@@ -49,7 +52,8 @@ func newHarness() (*harness, error) {
 	allocations := allocation.New(stateStore, clock, ids)
 	probes := probe.New(stateStore, clock, ids, allocations)
 	assessments := assessment.New(stateStore, clock, ids)
-	api := httpapi.New(plans, nodes, allocations, probes, assessments, ids, logger)
+	calendars := calendar.New(stateStore, clock, ids)
+	api := httpapi.New(plans, nodes, allocations, probes, assessments, calendars, ids, logger)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -76,6 +80,10 @@ func (h *harness) close() {
 	_ = h.server.Shutdown(ctx)
 	_ = h.listener.Close()
 	_ = os.RemoveAll(h.tempDir)
+}
+
+func (h *harness) ctx() context.Context {
+	return context.Background()
 }
 
 func (h *harness) call(method string, path string, requestBody any, target any) error {

@@ -21,4 +21,14 @@ func (s *Server) routes(mux *http.ServeMux) {
 
 	mux.HandleFunc("PATCH /v1/plans/{id}/assessments", s.assessPlan)
 	mux.HandleFunc("GET /v1/plans/{id}/assessments/latest", s.latestAssessment)
+
+	mux.HandleFunc("PUT /v1/calendars", s.createCalendar)
+	mux.HandleFunc("GET /v1/calendars", s.listCalendars)
+	mux.HandleFunc("GET /v1/calendars/{id}", s.getCalendar)
+	mux.HandleFunc("PATCH /v1/calendars/{id}/archive", s.archiveCalendar)
+	mux.HandleFunc("DELETE /v1/calendars/{id}", s.archiveCalendar)
+	mux.HandleFunc("PUT /v1/calendars/{id}/windows", s.addWindow)
+	mux.HandleFunc("DELETE /v1/calendars/{id}/windows/{window_id}", s.archiveWindow)
+	mux.HandleFunc("GET /v1/calendar-admission", s.resolveAdmission)
+	mux.HandleFunc("PATCH /v1/calendar-admission", s.resolveAdmission)
 }

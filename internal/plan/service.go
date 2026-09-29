@@ -8,6 +8,7 @@ import (
 
 	"solo-0014-zone-rollout-control/internal/domain"
 	"solo-0014-zone-rollout-control/internal/platform"
+	"solo-0014-zone-rollout-control/internal/schedule"
 	"solo-0014-zone-rollout-control/internal/store"
 )
 
@@ -126,12 +127,23 @@ func (s *Service) Activate(
 			return versionConflict(planID, expectedVersion, current.Version)
 		}
 		now := s.clock.Now().UTC()
+		// Activation and node allocation use the same calendar
+		// interpretation. The decision is frozen on the plan at activation
+		// and is never re-evaluated, so later window changes cannot change
+		// the approval under which the rollout started.
+		decision := schedule.FromState(state, schedule.Scope{Zone: current.Zone}, now)
+		if !decision.Allowed {
+			return schedule.DeniedError(decision)
+		}
 		if err := domain.ActivatePlan(&current, now); err != nil {
 			return err
 		}
+		current.Admission = &decision
 		state.Plans[planID] = current
 		store.AddAudit(state, s.ids, "plan", planID, "activated", now, map[string]any{
-			"version": current.Version,
+			"version":           current.Version,
+			"admission_mode":    decision.Mode,
+			"matched_window_id": decision.MatchedWindowID,
 		})
 		plan = current
 		return nil

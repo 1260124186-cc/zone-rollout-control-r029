@@ -39,6 +39,16 @@
       "responsibility": "probe aggregation, deterministic verdicts, and latest result reads"
     },
     {
+      "id": "calendar",
+      "path": "internal/calendar",
+      "responsibility": "maintenance calendar registration, window tombstones, and read-only admission queries"
+    },
+    {
+      "id": "schedule",
+      "path": "internal/schedule",
+      "responsibility": "timezone, midnight crossing, daylight saving, suspension, and overlap interpretation"
+    },
+    {
       "id": "domain",
       "path": "internal/domain",
       "responsibility": "entities, DNS value validation, transitions, and stable errors"
@@ -151,6 +161,31 @@
         "httpapi",
         "assessment",
         "probe",
+        "domain",
+        "storage"
+      ]
+    },
+    {
+      "id": "calendar-window-admission",
+      "name": "Timezone maintenance calendar admission",
+      "entry": "PUT /v1/calendars -> windows -> activate/leases -> calendar-admission",
+      "steps": [
+        "register an IANA timezone calendar scoped to zones and regions",
+        "register one-time and weekly windows plus suspension tombstones",
+        "evaluate plan activation and node allocation through the same pure engine",
+        "freeze admission on the plan and lease group without recomputing on replay",
+        "resolve cross-midnight, daylight saving gaps and folds deterministically",
+        "restore the active windows from the snapshot after restart"
+      ],
+      "success": "in-window actions freeze their matched window, projects without a calendar remain deployable at any time, and frozen approvals survive later window changes",
+      "failure": "outside-window and suspended actions return outside_maintenance_window without partial writes",
+      "verification": "workflowprobe calendar-window-admission covers scheduled admission, suspension veto, DST shift and reject, fall-back folds, midnight crossing, immutable frozen approvals, and restart restoration",
+      "module_ids": [
+        "httpapi",
+        "calendar",
+        "schedule",
+        "plan",
+        "allocation",
         "domain",
         "storage"
       ]
